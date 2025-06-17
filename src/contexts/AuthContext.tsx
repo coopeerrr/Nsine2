@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react'
 import { User, Session } from '@supabase/supabase-js'
 import { supabase, UserProfile, getUserProfile } from '../lib/supabase'
 
@@ -30,37 +30,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setUser(session?.user ?? null)
-      if (session?.user) {
-        loadUserProfile(session.user.id)
-      } else {
-        setLoading(false)
-      }
-    })
-
-    // Listen for auth changes
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setSession(session)
-      setUser(session?.user ?? null)
-      
-      if (session?.user) {
-        await loadUserProfile(session.user.id)
-      } else {
-        setUserProfile(null)
-        setLoading(false)
-      }
-    })
-
-    return () => subscription.unsubscribe()
-  }, [])
-
-  const loadUserProfile = async (userId: string) => {
+  // Memoize the loadUserProfile function to prevent unnecessary recreations
+  const loadUserProfile = useCallback(async (userId: string) => {
     try {
       const profile = await getUserProfile(userId)
       setUserProfile(profile)
@@ -70,25 +41,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  const refreshProfile = async () => {
+  // Memoize the refreshProfile function
+  const refreshProfile = useCallback(async () => {
     if (user) {
       await loadUserProfile(user.id)
     }
-  }
+  }, [user, loadUserProfile])
 
-  const isAdmin = userProfile?.role === 'admin'
-
-  const signIn = async (email: string, password: string) => {
+  // Memoize the signIn function
+  const signIn = useCallback(async (email: string, password: string) => {
     const result = await supabase.auth.signInWithPassword({
       email,
       password,
     })
     return result
-  }
+  }, [])
 
-  const signUp = async (email: string, password: string, fullName?: string) => {
+  // Memoize the signUp function
+  const signUp = useCallback(async (email: string, password: string, fullName?: string) => {
     try {
       const result = await supabase.auth.signUp({
         email,
@@ -138,14 +110,57 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('Signup error:', error)
       throw error
     }
-  }
+  }, [])
 
-  const signOut = async () => {
+  // Memoize the signOut function
+  const signOut = useCallback(async () => {
     await supabase.auth.signOut()
     setUserProfile(null)
-  }
+  }, [])
 
-  const value = {
+  // Memoize the isAdmin value
+  const isAdmin = useMemo(() => userProfile?.role === 'admin', [userProfile?.role])
+
+  useEffect(() => {
+    // Get initial session
+    const initializeAuth = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        setSession(session)
+        setUser(session?.user ?? null)
+        if (session?.user) {
+          await loadUserProfile(session.user.id)
+        } else {
+          setLoading(false)
+        }
+      } catch (error) {
+        console.error('Error initializing auth:', error)
+        setLoading(false)
+      }
+    }
+
+    initializeAuth()
+
+    // Listen for auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      setSession(session)
+      setUser(session?.user ?? null)
+      
+      if (session?.user) {
+        await loadUserProfile(session.user.id)
+      } else {
+        setUserProfile(null)
+        setLoading(false)
+      }
+    })
+
+    return () => subscription.unsubscribe()
+  }, [loadUserProfile])
+
+  // Memoize the context value to prevent unnecessary re-renders
+  const value = useMemo(() => ({
     user,
     session,
     userProfile,
@@ -155,7 +170,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     signUp,
     signOut,
     refreshProfile,
-  }
+  }), [user, session, userProfile, isAdmin, loading, signIn, signUp, signOut, refreshProfile])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

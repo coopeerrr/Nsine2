@@ -100,6 +100,10 @@ ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 
 -- User Profiles Policies
+DROP POLICY IF EXISTS "Users can view own profile" ON user_profiles;
+DROP POLICY IF EXISTS "Users can update own profile" ON user_profiles;
+DROP POLICY IF EXISTS "Admins can view all profiles" ON user_profiles;
+
 CREATE POLICY "Users can view own profile"
   ON user_profiles
   FOR SELECT
@@ -122,6 +126,13 @@ CREATE POLICY "Admins can view all profiles"
       WHERE id = auth.uid() AND role = 'admin'
     )
   );
+
+-- Add policy for inserting new profiles
+CREATE POLICY "Users can insert their own profile"
+  ON user_profiles
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = id);
 
 -- Categories Policies
 CREATE POLICY "Anyone can read categories"
@@ -226,18 +237,27 @@ CREATE INDEX idx_user_profiles_role ON user_profiles(role);
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger AS $$
 BEGIN
-  INSERT INTO public.user_profiles (id, email, full_name)
+  INSERT INTO public.user_profiles (id, email, full_name, role)
   VALUES (
     new.id,
     new.email,
-    COALESCE(new.raw_user_meta_data->>'full_name', new.email)
-  );
+    COALESCE(new.raw_user_meta_data->>'full_name', new.email),
+    'customer'
+  )
+  ON CONFLICT (id) DO UPDATE
+  SET
+    email = EXCLUDED.email,
+    full_name = EXCLUDED.full_name,
+    updated_at = now();
   RETURN new;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Trigger to create profile on user signup
-CREATE OR REPLACE TRIGGER on_auth_user_created
+-- Drop existing trigger if it exists
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+
+-- Create trigger to create profile on user signup
+CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
