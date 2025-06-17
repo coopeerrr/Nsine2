@@ -27,16 +27,96 @@ DROP TABLE IF EXISTS orders CASCADE;
 DROP TABLE IF EXISTS products CASCADE;
 DROP TABLE IF EXISTS categories CASCADE;
 DROP TABLE IF EXISTS user_profiles CASCADE;
+DROP FUNCTION IF EXISTS handle_new_user() CASCADE;
 
--- Create user_profiles table for role management
+-- Create user_profiles table with proper constraints
 CREATE TABLE user_profiles (
-  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  email text NOT NULL,
-  role text NOT NULL DEFAULT 'customer' CHECK (role IN ('admin', 'customer')),
-  full_name text,
-  created_at timestamptz DEFAULT now(),
-  updated_at timestamptz DEFAULT now()
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'customer')),
+    full_name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Enable Row Level Security
+ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
+
+-- Create policies
+CREATE POLICY "Users can view their own profile"
+    ON user_profiles
+    FOR SELECT
+    USING (auth.uid() = id);
+
+CREATE POLICY "Users can update their own profile"
+    ON user_profiles
+    FOR UPDATE
+    USING (auth.uid() = id);
+
+CREATE POLICY "Admins can view all profiles"
+    ON user_profiles
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM user_profiles
+            WHERE id = auth.uid() AND role = 'admin'
+        )
+    );
+
+CREATE POLICY "Admins can update all profiles"
+    ON user_profiles
+    FOR UPDATE
+    USING (
+        EXISTS (
+            SELECT 1 FROM user_profiles
+            WHERE id = auth.uid() AND role = 'admin'
+        )
+    );
+
+-- Function to handle new user creation
+CREATE OR REPLACE FUNCTION handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO user_profiles (id, email, role, full_name)
+    VALUES (
+        NEW.id,
+        NEW.email,
+        'customer',
+        COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email)
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to create profile on user signup
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW
+    EXECUTE FUNCTION handle_new_user();
+
+-- Grant necessary permissions
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT ALL ON user_profiles TO authenticated;
+
+-- Create function to create admin users
+CREATE OR REPLACE FUNCTION create_admin_user(user_email TEXT)
+RETURNS void AS $$
+BEGIN
+    -- Check if the requesting user is an admin
+    IF NOT EXISTS (
+        SELECT 1 FROM user_profiles
+        WHERE id = auth.uid() AND role = 'admin'
+    ) THEN
+        RAISE EXCEPTION 'Only admins can create admin users';
+    END IF;
+
+    -- Update the user's role to admin
+    UPDATE user_profiles
+    SET role = 'admin'
+    WHERE email = user_email;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Categories table
 CREATE TABLE categories (
@@ -93,46 +173,10 @@ CREATE TABLE messages (
 );
 
 -- Enable Row Level Security
-ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
-
--- User Profiles Policies
-DROP POLICY IF EXISTS "Users can view own profile" ON user_profiles;
-DROP POLICY IF EXISTS "Users can update own profile" ON user_profiles;
-DROP POLICY IF EXISTS "Admins can view all profiles" ON user_profiles;
-
-CREATE POLICY "Users can view own profile"
-  ON user_profiles
-  FOR SELECT
-  TO authenticated
-  USING (auth.uid() = id);
-
-CREATE POLICY "Users can update own profile"
-  ON user_profiles
-  FOR UPDATE
-  TO authenticated
-  USING (auth.uid() = id);
-
-CREATE POLICY "Admins can view all profiles"
-  ON user_profiles
-  FOR SELECT
-  TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM user_profiles 
-      WHERE id = auth.uid() AND role = 'admin'
-    )
-  );
-
--- Add policy for inserting new profiles
-CREATE POLICY "Users can insert their own profile"
-  ON user_profiles
-  FOR INSERT
-  TO authenticated
-  WITH CHECK (auth.uid() = id);
 
 -- Categories Policies
 CREATE POLICY "Anyone can read categories"
@@ -232,34 +276,6 @@ CREATE INDEX idx_orders_status ON orders(status);
 CREATE INDEX idx_orders_created_at ON orders(created_at);
 CREATE INDEX idx_messages_is_read ON messages(is_read);
 CREATE INDEX idx_user_profiles_role ON user_profiles(role);
-
--- Function to automatically create user profile
-CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS trigger AS $$
-BEGIN
-  INSERT INTO public.user_profiles (id, email, full_name, role)
-  VALUES (
-    new.id,
-    new.email,
-    COALESCE(new.raw_user_meta_data->>'full_name', new.email),
-    'customer'
-  )
-  ON CONFLICT (id) DO UPDATE
-  SET
-    email = EXCLUDED.email,
-    full_name = EXCLUDED.full_name,
-    updated_at = now();
-  RETURN new;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Drop existing trigger if it exists
-DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
-
--- Create trigger to create profile on user signup
-CREATE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users
-  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
 -- Insert sample categories
 INSERT INTO categories (name, description, image_url) VALUES
@@ -429,18 +445,3 @@ INSERT INTO orders (customer_email, customer_name, customer_phone, products, tot
     'shipped',
     '{"street": "456 Health Ave", "city": "Medical Town", "state": "MT", "zip": "67890", "country": "USA"}'
   );
-
--- Create admin user function (to be called after user signup)
-CREATE OR REPLACE FUNCTION create_admin_user(user_email text)
-RETURNS void AS $$
-BEGIN
-  UPDATE user_profiles 
-  SET role = 'admin' 
-  WHERE email = user_email;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Grant necessary permissions
-GRANT USAGE ON SCHEMA public TO anon, authenticated;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;

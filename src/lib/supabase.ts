@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, SupabaseClient, PostgrestResponse, PostgrestSingleResponse } from '@supabase/supabase-js'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -12,7 +12,7 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 // Configure Supabase client with optimized settings
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase: SupabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
@@ -93,7 +93,29 @@ export interface Message {
 const profileCache = new Map<string, { profile: UserProfile; timestamp: number }>()
 const CACHE_DURATION = 5 * 60 * 1000 // 5 minutes
 
-export const getUserProfile = async (userId: string) => {
+// Retry configuration
+const MAX_RETRIES = 3
+const RETRY_DELAY = 1000 // 1 second
+
+// Helper function to wait
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// Helper function to retry operations
+async function retryOperation<T>(
+  operation: () => Promise<PostgrestSingleResponse<T>>,
+  retries = MAX_RETRIES,
+  delay = RETRY_DELAY
+): Promise<PostgrestSingleResponse<T>> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (retries === 0) throw error
+    await wait(delay)
+    return retryOperation(operation, retries - 1, delay * 2)
+  }
+}
+
+export const getUserProfile = async (userId: string): Promise<UserProfile> => {
   try {
     // Check cache first
     const cached = profileCache.get(userId)
@@ -103,11 +125,13 @@ export const getUserProfile = async (userId: string) => {
     }
 
     console.log('Fetching profile for user:', userId)
-    const { data, error } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('id', userId)
-      .single()
+    const { data, error } = await retryOperation<UserProfile>(async () => {
+      return await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
+    })
     
     if (error) {
       console.error('Error fetching user profile:', {
@@ -123,16 +147,18 @@ export const getUserProfile = async (userId: string) => {
         const { data: user } = await supabase.auth.getUser()
         if (user?.user) {
           console.log('Creating profile for user:', user.user.email)
-          const { data: newProfile, error: insertError } = await supabase
-            .from('user_profiles')
-            .insert({
-              id: userId,
-              email: user.user.email,
-              full_name: user.user.user_metadata.full_name || user.user.email,
-              role: 'customer'
-            })
-            .select()
-            .single()
+          const { data: newProfile, error: insertError } = await retryOperation<UserProfile>(async () => {
+            return await supabase
+              .from('user_profiles')
+              .insert({
+                id: userId,
+                email: user.user.email,
+                full_name: user.user.user_metadata.full_name || user.user.email,
+                role: 'customer'
+              })
+              .select()
+              .single()
+          })
           
           if (insertError) {
             console.error('Error creating user profile:', {
@@ -145,16 +171,21 @@ export const getUserProfile = async (userId: string) => {
           }
           console.log('Successfully created new profile:', newProfile)
           // Cache the new profile
-          profileCache.set(userId, { profile: newProfile as UserProfile, timestamp: Date.now() })
-          return newProfile as UserProfile
+          if (newProfile) {
+            profileCache.set(userId, { profile: newProfile, timestamp: Date.now() })
+            return newProfile
+          }
         }
       }
       throw error
     }
     console.log('Successfully fetched profile:', data)
     // Cache the fetched profile
-    profileCache.set(userId, { profile: data as UserProfile, timestamp: Date.now() })
-    return data as UserProfile
+    if (data) {
+      profileCache.set(userId, { profile: data, timestamp: Date.now() })
+      return data
+    }
+    throw new Error('No profile data returned')
   } catch (error) {
     console.error('Error in getUserProfile:', {
       error,
@@ -165,23 +196,25 @@ export const getUserProfile = async (userId: string) => {
   }
 }
 
-export const updateUserProfile = async (userId: string, updates: Partial<UserProfile>) => {
+export const updateUserProfile = async (userId: string, updates: Partial<UserProfile>): Promise<UserProfile> => {
   try {
-    const { data, error } = await supabase
-      .from('user_profiles')
-      .update({ ...updates, updated_at: new Date().toISOString() })
-      .eq('id', userId)
-      .select()
-      .single()
+    const { data, error } = await retryOperation<UserProfile>(async () => {
+      return await supabase
+        .from('user_profiles')
+        .update({ ...updates, updated_at: new Date().toISOString() })
+        .eq('id', userId)
+        .select()
+        .single()
+    })
     
     if (error) throw error
 
     // Update cache
     if (data) {
-      profileCache.set(userId, { profile: data as UserProfile, timestamp: Date.now() })
+      profileCache.set(userId, { profile: data, timestamp: Date.now() })
+      return data
     }
-
-    return data as UserProfile
+    throw new Error('No profile data returned after update')
   } catch (error) {
     console.error('Error updating user profile:', error)
     throw error
@@ -198,7 +231,9 @@ export const clearProfileCache = (userId?: string) => {
 }
 
 // Helper functions for admin operations
-export const createAdminUser = async (email: string) => {
-  const { error } = await supabase.rpc('create_admin_user', { user_email: email })
+export const createAdminUser = async (email: string): Promise<void> => {
+  const { error } = await retryOperation<null>(async () => {
+    return await supabase.rpc('create_admin_user', { user_email: email })
+  })
   if (error) throw error
 }
