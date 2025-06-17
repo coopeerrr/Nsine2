@@ -89,16 +89,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }
 
   const signUp = async (email: string, password: string, fullName?: string) => {
-    const result = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: fullName || email,
+    try {
+      const result = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName || email,
+          },
         },
-      },
-    })
-    return result
+      })
+
+      if (result.error) {
+        throw result.error
+      }
+
+      // Wait a moment for the trigger to create the profile
+      await new Promise(resolve => setTimeout(resolve, 1000))
+
+      // Verify the profile was created
+      if (result.data.user) {
+        const { data: profile, error: profileError } = await supabase
+          .from('user_profiles')
+          .select('*')
+          .eq('id', result.data.user.id)
+          .single()
+
+        if (profileError || !profile) {
+          console.error('Profile creation error:', profileError)
+          // Try to create the profile manually if the trigger failed
+          const { error: insertError } = await supabase
+            .from('user_profiles')
+            .insert({
+              id: result.data.user.id,
+              email: email,
+              full_name: fullName || email,
+              role: 'customer'
+            })
+          
+          if (insertError) {
+            console.error('Manual profile creation failed:', insertError)
+          }
+        }
+      }
+
+      return result
+    } catch (error) {
+      console.error('Signup error:', error)
+      throw error
+    }
   }
 
   const signOut = async () => {

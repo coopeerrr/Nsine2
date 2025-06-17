@@ -81,14 +81,44 @@ export const createAdminUser = async (email: string) => {
 }
 
 export const getUserProfile = async (userId: string) => {
-  const { data, error } = await supabase
-    .from('user_profiles')
-    .select('*')
-    .eq('id', userId)
-    .single()
-  
-  if (error) throw error
-  return data as UserProfile
+  try {
+    const { data, error } = await supabase
+      .from('user_profiles')
+      .select('*')
+      .eq('id', userId)
+      .single()
+    
+    if (error) {
+      console.error('Error fetching user profile:', error)
+      // If profile doesn't exist, create it
+      if (error.code === 'PGRST116') {
+        const { data: user } = await supabase.auth.getUser()
+        if (user?.user) {
+          const { data: newProfile, error: insertError } = await supabase
+            .from('user_profiles')
+            .insert({
+              id: userId,
+              email: user.user.email,
+              full_name: user.user.user_metadata.full_name || user.user.email,
+              role: 'customer'
+            })
+            .select()
+            .single()
+          
+          if (insertError) {
+            console.error('Error creating user profile:', insertError)
+            throw insertError
+          }
+          return newProfile as UserProfile
+        }
+      }
+      throw error
+    }
+    return data as UserProfile
+  } catch (error) {
+    console.error('Error in getUserProfile:', error)
+    throw error
+  }
 }
 
 export const updateUserProfile = async (userId: string, updates: Partial<UserProfile>) => {
